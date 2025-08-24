@@ -6,21 +6,16 @@ import pandas as pd
 from esda.moran import Moran, Moran_Local
 import numpy as np
 import torch
-from matplotlib.patches import Patch
 from sklearn.cluster import KMeans
-from splot.esda import moran_scatterplot
-
+from adjustText import adjust_text
 warnings.filterwarnings("ignore")
 seed = 30
 np.random.seed(seed)
 torch.manual_seed(seed)
-
-# Load data
 gdf = gpd.read_file('Beijing.shp')
 carbon_data = pd.read_csv('carbon_esdata.csv')
-gdf = gdf.merge(carbon_data, on='PAC')  # Assuming the merge field is 'PAC'
+gdf = gdf.merge(carbon_data, on='PAC')
 
-# Create a mapping dictionary from Chinese to English district names
 district_name_map = {
     '朝阳区': 'Chaoyang',
     '通州区': 'Tongzhou',
@@ -39,95 +34,149 @@ district_name_map = {
 }
 
 gdf['NAME_x'] = gdf['NAME_x'].map(district_name_map)
-
 X = gdf[['2017']].values
-
-# Apply K-means clustering, assuming we want to create 3 clusters
 kmeans = KMeans(n_clusters=3, random_state=42)
 gdf['Cluster'] = kmeans.fit_predict(X)
 
-# Construct Queen spatial weights matrix
 w = ps.weights.Queen.from_dataframe(gdf)
-w.transform = 'r'  # Row-standardize the weights
-
-# Calculate global Moran's I
+w.transform = 'r'
 moran = Moran(gdf['2017'], w)
-print(f"Global Moran's I: {moran.I:.3f}, p-value: {moran.p_sim:.3f}")
-
-# Local Moran's I calculation and scatter plot
-ga_moran_loc = Moran_Local(gdf['2017'], w, permutations=200)
-fig2, ax0 = moran_scatterplot(ga_moran_loc, zstandard=False, p=0.05)
-
-# Labelling the scatter plot
-ax0.set_title("")  # Remove title
-ax0.set_xlabel('Pct Bach')
-ax0.set_ylabel('Spatial Lag of Pct Bach')
+y = gdf['2017'].values
+spatial_lag = ps.weights.lag_spatial(w, y)
+moran_global = Moran(y, w)
+moran_loc = Moran_Local(y, w, permutations=999)
+significant = moran_loc.p_sim < 0.05
+colors = np.where(significant, 'steelblue', 'lightgray')
+edgecolors = np.where(significant, 'darkblue', 'gray')
+plt.figure(figsize=(10, 8))
+sc = plt.scatter(y, spatial_lag, c=colors, edgecolor=edgecolors,
+                s=100, linewidth=1.2, alpha=0.8, zorder=5)
+fit_coef = np.polyfit(y, spatial_lag, 1)
+regression_line = fit_coef[0] * y + fit_coef[1]
+plt.plot(y, regression_line,
+         color='red', linewidth=2, linestyle='--',
+         label=f"Regression slope = {fit_coef[0]:.2f}", zorder=3)
+texts = []
+for i in range(len(y)):
+    if significant[i]:
+        texts.append(plt.text(y[i], spatial_lag[i], gdf['NAME_x'].iloc[i],
+                             fontsize=9, ha='center', va='center', color='black',
+                             bbox=dict(boxstyle='round,pad=0.3',
+                                     fc='white', alpha=0.8, ec='none'),
+                             zorder=10))
+    else:
+        texts.append(plt.text(y[i], spatial_lag[i], gdf['NAME_x'].iloc[i],
+                             fontsize=8, ha='center', va='center', color='grey',
+                             alpha=0.7, zorder=9))
+adjust_text(texts,
+            arrowprops=dict(arrowstyle='->', color='gray', lw=0.5, alpha=0.6),
+            expand_points=(1.2, 1.2))
+plt.axhline(y=np.mean(spatial_lag), color='gray', linestyle=':', alpha=0.7)
+plt.axvline(x=np.mean(y), color='gray', linestyle=':', alpha=0.7)
+quadrant_labels = ['HH', 'LH', 'LL', 'HL']
+quadrant_positions = [(0.9,0.9), (0.1,0.9), (0.1,0.1), (0.9,0.1)]
+for label, pos in zip(quadrant_labels, quadrant_positions):
+    plt.text(pos[0], pos[1], label, transform=plt.gca().transAxes,
+            fontsize=12, weight='bold', alpha=0.6)
+legend_elements = [
+    plt.Line2D([0], [0], marker='o', color='w', label='Significant',
+              markerfacecolor='steelblue', markersize=10, markeredgecolor='darkblue'),
+    plt.Line2D([0], [0], marker='o', color='w', label='Not Significant',
+              markerfacecolor='lightgray', markersize=10, markeredgecolor='gray'),
+]
+plt.legend(handles=legend_elements, loc='upper right', framealpha=0.8)
+plt.xlabel('Pct Bach', labelpad=10)
+plt.ylabel('Spatial Lag of Pct Bach', labelpad=10)
+plt.grid(True, alpha=0.2)
+plt.tight_layout()
+plt.savefig('figure_3.pdf', dpi=300, bbox_inches='tight')
 plt.show()
 
-# Calculate LISA (Local Indicators of Spatial Association)
 lisa = Moran_Local(gdf['2017'], w)
-
-# Store clustering type and significance results in GeoDataFrame
-gdf['LISA_Type'] = lisa.q  # Clustering type (1=HH, 2=LH, 3=LL, 4=HL)
-gdf['LISA_Sig'] = lisa.p_sim < 0.05  # Significance flag
-
-# Define labels for clustering types
+gdf['LISA_Type'] = lisa.q
+gdf['LISA_Sig'] = lisa.p_sim < 0.05
 lisa_labels = {
     1: 'HH (High-High)',
     2: 'LH (Low-High)',
     3: 'LL (Low-Low)',
     4: 'HL (High-Low)',
-    0: 'NS (Not Significant)'  # Non-significant regions
-}
-
-# Assign clustering types to significant regions and 0 (non-significant) to others
+    0: 'NS (Not Significant)'  }
 gdf['LISA_Cluster'] = gdf['LISA_Type'].where(gdf['LISA_Sig'], 0)
 
-# Visualization of clustering results
-fig, ax1 = plt.subplots(figsize=(10, 10))
-# Set color map
-cmap = plt.get_cmap('tab10', 3)  # 'tab10' is a colormap with many colors, '3' specifies we need 3 colors
-gdf.plot(column='Cluster', ax=ax1, cmap=cmap, legend=False)  # Don't use legend_kwds for colorbar
+fig, ax1 = plt.subplots(figsize=(14, 12))
+cmap = plt.get_cmap('viridis', 3)
+gdf.plot(column='Cluster', ax=ax1, cmap=cmap, edgecolor='white', linewidth=0.8, legend=False)
 sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=2))
 sm._A = []
-fig.colorbar(sm, ax=ax1, orientation='vertical', fraction=0.02, pad=0.02)
-
-# Create legend manually
-legend_labels = ['Cluster 1', 'Cluster 2', 'Cluster 3']
-colors = [cmap(0), cmap(1), cmap(2)]  # Get the colors from the colormap
-# Create legend items for each cluster
-handles = [Patch(color=color, label=label) for color, label in zip(colors, legend_labels)]
-
-# Annotate each district with its name
+cbar = fig.colorbar(sm, ax=ax1, orientation='vertical', fraction=0.03, pad=0.02)
+cbar.set_ticks([0.33, 1.0, 1.66])
+cbar.set_ticklabels(['Cluster 1', 'Cluster 2', 'Cluster 3'])
+labeled_areas = {
+    'Dongcheng': {'offset': (50, -20), 'direction': 'south'},
+    'Xicheng': {'offset': (20, 20), 'direction': 'east'},
+    'Chaoyang': {'offset': (0, 20), 'direction': 'north'},
+}
+def is_overlap(new_pos, existing_positions, min_distance=20):
+    for pos in existing_positions:
+        if ((new_pos[0] - pos[0]) ** 2 + (new_pos[1] - pos[1]) ** 2) ** 0.5 < min_distance:
+            return True
+    return False
+label_positions = []
 for idx, row in gdf.iterrows():
-    # Get the centroid of each district
-    x, y = row['geometry'].centroid.x, row['geometry'].centroid.y
-    # Annotate the district's name at the centroid
+    geom = row['geometry']
+    name = row['NAME_x']
+    area = geom.area
+    if area < 0.02:
+        x, y = geom.representative_point().x, geom.representative_point().y
+    else:
+        x, y = geom.centroid.x, geom.centroid.y
+    fontsize = 10
+    offset = (15, 10)
+    rotation = 0
+    bbox_props = dict(boxstyle='round,pad=0.3', fc='white', alpha=0.9, ec='none')
+    arrow_props = None
+    text_pos = (x + offset[0], y + offset[1])
+    if name in labeled_areas:
+        config = labeled_areas[name]
+        base_offset = config['offset']
+        if config['direction'] == 'north':
+            offset = (base_offset[0], abs(base_offset[1]))
+        elif config['direction'] == 'south':
+            offset = (base_offset[0], -abs(base_offset[1]))
+        elif config['direction'] == 'west':
+            offset = (-abs(base_offset[0]), base_offset[1])
+        elif config['direction'] == 'northwest':
+            offset = (-abs(base_offset[0]), abs(base_offset[1]))
+        text_pos = (x + offset[0], y + offset[1])
+        adjust_factor = 1
+        while is_overlap(text_pos, label_positions):
+            adjust_factor += 0.2
+            offset = (base_offset[0] * adjust_factor, base_offset[1] * adjust_factor)
+            text_pos = (x + offset[0], y + offset[1])
+        arrow_props = dict(arrowstyle="->", color='red', lw=1.5, alpha=0.8, shrinkA=5)
+    label_positions.append(text_pos)
     ax1.annotate(
-        row['NAME_x'],  # District name field
-        xy=(x, y),  # Location of the annotation
-        xytext=(0, 0),  # Offset of the text
-        textcoords="offset points",  # Offset unit is points
-        ha='center',  # Horizontal alignment
-        fontsize=12,  # Font size
-        color='black',  # Font color
-        alpha = 0.7,  # Text transparency
-        rotation = -45  # Rotate text by -45 degrees
+        name,
+        xy=(x, y),
+        xytext=offset,
+        textcoords="offset points",
+        ha='center',
+        fontsize=fontsize,
+        color='black',
+        bbox=bbox_props,
+        rotation=rotation,
+        arrowprops=arrow_props
     )
 
-# Adjust legend display, place it beside and shrink the size
-ax1.legend(handles=handles)
+ax1.set_xlabel("Longitude")
+ax1.set_ylabel("Latitude")
+ax1.grid(True, linestyle='--', alpha=0.5)
 plt.tight_layout()
-# Save the first image
 plt.savefig('figure_5.pdf', dpi=300, bbox_inches='tight')
-# Clear the current figure
-plt.clf()
+plt.show()
 
-# Plot for LISA Cluster Types
-fig, ax1 = plt.subplots(figsize=(10, 10))
-# First plot all areas as light grey (non-significant background)
+fig, ax1 = plt.subplots(figsize=(14, 12))
 gdf.plot(color='lightgrey', ax=ax1, edgecolor='k', linewidth=0.5)
-# Then overlay significant and non-significant region clusters
 gdf.plot(column='LISA_Cluster',
          categorical=True,
          legend=True,
@@ -138,55 +187,90 @@ gdf.plot(column='LISA_Cluster',
              'labels': [lisa_labels[i] for i in sorted(gdf['LISA_Cluster'].unique())]
          })
 
-# Annotate each district with its name
+labeled_areas = {
+    'Dongcheng': {'offset': (50, -20), 'direction': 'south'},
+    'Xicheng': {'offset': (20, 20), 'direction': 'east'},
+    'Chaoyang': {'offset': (0, 20), 'direction': 'north'},
+}
+
+def is_overlap(new_pos, existing_positions, min_distance=20):
+    for pos in existing_positions:
+        if ((new_pos[0] - pos[0]) ** 2 + (new_pos[1] - pos[1]) ** 2) ** 0.5 < min_distance:
+            return True
+    return False
+label_positions = []
+
 for idx, row in gdf.iterrows():
-    # Get the centroid of each district
-    x, y = row['geometry'].centroid.x, row['geometry'].centroid.y
-    # Annotate the district's name at the centroid
+    geom = row['geometry']
+    name = row['NAME_x']
+    area = geom.area
+    if area < 0.02:
+        x, y = geom.representative_point().x, geom.representative_point().y
+    else:
+        x, y = geom.centroid.x, geom.centroid.y
+
+    fontsize = 10
+    offset = (15, 10)
+    rotation = 0
+    bbox_props = dict(boxstyle='round,pad=0.3', fc='white', alpha=0.9, ec='none')
+    arrow_props = None
+    text_pos = (x + offset[0], y + offset[1])
+
+    if name in labeled_areas:
+        config = labeled_areas[name]
+        base_offset = config['offset']
+
+        if config['direction'] == 'north':
+            offset = (base_offset[0], abs(base_offset[1]))
+        elif config['direction'] == 'south':
+            offset = (base_offset[0], -abs(base_offset[1]))
+        elif config['direction'] == 'west':
+            offset = (-abs(base_offset[0]), base_offset[1])
+        elif config['direction'] == 'northwest':
+            offset = (-abs(base_offset[0]), abs(base_offset[1]))
+        text_pos = (x + offset[0], y + offset[1])
+        adjust_factor = 1
+        while is_overlap(text_pos, label_positions):
+            adjust_factor += 0.2
+            offset = (base_offset[0] * adjust_factor, base_offset[1] * adjust_factor)
+            text_pos = (x + offset[0], y + offset[1])
+
+        arrow_props = dict(arrowstyle="->", color='red', lw=1.5, alpha=0.8, shrinkA=5)
+
+    label_positions.append(text_pos)
     ax1.annotate(
-        row['NAME_x'],  # District name field
-        xy=(x, y),  # Location of the annotation
-        xytext=(0, 0),  # Offset of the text
-        textcoords="offset points",  # Offset unit is points
-        ha='center',  # Horizontal alignment
-        fontsize=12,  # Font size
-        color='black',  # Font color
-        alpha=0.7,  # Text transparency
-        rotation = -45  # Rotate text by -45 degrees
+        name,
+        xy=(x, y),
+        xytext=offset,
+        textcoords="offset points",
+        ha='center',
+        fontsize=fontsize,
+        color='black',
+        bbox=bbox_props,
+        rotation=rotation,
+        arrowprops=arrow_props
     )
 
-# Adjust layout to remove empty spaces
+ax1.set_xlabel("Longitude")
+ax1.set_ylabel("Latitude")
+ax1.grid(True, linestyle='--', alpha=0.5)
 plt.tight_layout()
-# Save the second image
 plt.savefig('figure_4.pdf', dpi=300, bbox_inches='tight')
-
-# Reload data
+plt.show()
 gdf = gpd.read_file('Beijing.shp')
 carbon_data = pd.read_csv('carbon_esdata.csv')
-gdf = gdf.merge(carbon_data, on='PAC')  # Assuming the merge field is 'PAC'
-
-# Construct Queen spatial weights matrix
+gdf = gdf.merge(carbon_data, on='PAC')
 w = ps.weights.Queen.from_dataframe(gdf)
-w.transform = 'r'  # Row-standardize the weights
-
-# Create a data table to store Moran's I, p-value, and Z-value for each year
+w.transform = 'r'
 moran_results = []
-
-# Loop through each year to calculate Moran's I
 for year in range(1997, 2018):
     # Calculate global Moran's I
     moran = Moran(gdf[str(year)], w)
-
-    # Retrieve Moran's I, p-value, and Z-value
     moran_results.append({
         'Year': year,
         'Moran_I': moran.I,
         'p_value': moran.p_sim,
         'Z_value': moran.z_sim
     })
-
-# Convert the results to a DataFrame
 moran_df = pd.DataFrame(moran_results)
-
-# Print out Moran's I, p-value, and Z-value for each year
 print(moran_df)
