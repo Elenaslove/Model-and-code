@@ -8,3 +8,4 @@
 # Causal inference.py is code related to causal analysis.
 # TSPLO.m the file is code for TSPLO algorithm.
 # We recommend using Python 3.8, the relevant library requirements are as follows: pandas=1.5.3 numpy=1.23.5 networkx=2.8 matplotlib=3.7.5 causallearn scikit-learn=1.3.2 geopandas=0.13.2 warnings libpysal=4.8.1 esda=2.5.1 adjustText=1.3.0 seaborn=0.13.2 time math scipy=1.10.1. 
+# Note: In the paper, we describe using TMLE for causal effect estimation. In this repository, we provide a simplified TMLE implementation inspired by TMLE, which approximates causal effects using residual-based regression. This approach retains key advantages of TMLE while being computationally simpler.
